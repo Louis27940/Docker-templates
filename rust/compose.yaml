@@ -1,0 +1,99 @@
+name: rust-service
+
+# ==============================================================================
+# Docker Compose - Template Rust
+# Standards de production 3DOKR :
+# - Sécurité maximale : no-new-privileges, cap_drop: ALL
+# - Isolation réseau stricte (front-tier / back-tier interne)
+# - Secrets Docker Compose natifs
+# - Healthcheck déterministe avec dépendance conditionnelle
+# - Quotas stricts de CPU et Mémoire
+# - Images fixées au patch et basées sur Alpine (PostgreSQL 17.12 sur Alpine 3.23)
+# ==============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rust-service:latest
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    environment:
+      - RUST_LOG=info
+      - PORT=8080
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:?Variable DB_NAME is required in .env}
+      - DB_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - DB_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+    networks:
+      - front-tier
+      - back-tier
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  db:
+    image: postgres:17.12-alpine3.23
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    environment:
+      - POSTGRES_DB=${DB_NAME:?Variable DB_NAME is required in .env}
+      - POSTGRES_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - rust-db-data:/var/lib/postgresql/data
+    networks:
+      - back-tier
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?Variable required} -d ${DB_NAME:?Variable required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+networks:
+  front-tier:
+  back-tier:
+    internal: true
+
+volumes:
+  rust-db-data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt

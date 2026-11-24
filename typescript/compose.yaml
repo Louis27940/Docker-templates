@@ -1,0 +1,99 @@
+name: typescript-service
+
+# ==============================================================================
+# Docker Compose - Template TypeScript
+# Standards de production 3DOKR :
+# - Sécurité no-new-privileges et cap_drop: ALL
+# - Réseau isolé à 2 tiers (front-tier / back-tier avec internal: true)
+# - Secrets gérés nativement par Docker Secrets
+# - Healthcheck fiable et dépendance déterministe
+# - Limitation de ressources CPU et Mémoire
+# - Images fixées au patch et basées sur Alpine (PostgreSQL 17.12 sur Alpine 3.23)
+# ==============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: typescript-service:latest
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:?Variable DB_NAME is required in .env}
+      - DB_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - DB_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+    networks:
+      - front-tier
+      - back-tier
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  db:
+    image: postgres:17.12-alpine3.23
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    environment:
+      - POSTGRES_DB=${DB_NAME:?Variable DB_NAME is required in .env}
+      - POSTGRES_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - ts-db-data:/var/lib/postgresql/data
+    networks:
+      - back-tier
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?Variable required} -d ${DB_NAME:?Variable required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+networks:
+  front-tier:
+  back-tier:
+    internal: true
+
+volumes:
+  ts-db-data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt

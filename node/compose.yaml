@@ -1,0 +1,118 @@
+name: node-service
+
+# ==============================================================================
+# Docker Compose - Template Node.js
+# Reprend les standards de sécurité et de résilience 3DOKR :
+# - Sécurité renforcée (no-new-privileges, cap_drop: ALL)
+# - Isolation réseau à deux niveaux (front-tier / back-tier internal: true)
+# - Gestion des secrets via Docker Secrets (pas de mot de passe en clair dans l'env)
+# - Healthchecks déterministes avec depends_on: condition: service_healthy
+# - Quotas de ressources (CPU / RAM)
+# - Liaison des ports au localhost (127.0.0.1)
+# - Images fixées au patch et basées sur Alpine (PostgreSQL 17.12 sur Alpine 3.23)
+# ==============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: node-service:latest
+    restart: unless-stopped
+    
+    # 1. Sécurité : interdiction d'élévation de privilèges et suppression des capabilities Linux
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # 2. Exposition contrôlée (uniquement sur localhost)
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+
+    # 3. Variables d'environnement non-sensibles
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:?Variable DB_NAME is required in .env}
+      - DB_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - DB_PASSWORD_FILE=/run/secrets/db_password
+
+    # 4. Secrets montés nativement en mémoire
+    secrets:
+      - db_password
+
+    # 5. Isolation réseau multi-niveaux
+    networks:
+      - front-tier
+      - back-tier
+
+    # 6. Démarrage déterministe après validation de la santé de la base
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # 7. Vérification de santé du service
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    # 8. Quotas de ressources pour éviter la saturation hôte
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  db:
+    image: postgres:17.12-alpine3.23
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    environment:
+      - POSTGRES_DB=${DB_NAME:?Variable DB_NAME is required in .env}
+      - POSTGRES_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - node-db-data:/var/lib/postgresql/data
+    networks:
+      - back-tier
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?Variable required} -d ${DB_NAME:?Variable required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+networks:
+  # front-tier : réseau public pour le trafic web ingress
+  front-tier:
+  # back-tier : réseau interne totalement isolé d'Internet
+  back-tier:
+    internal: true
+
+volumes:
+  node-db-data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt

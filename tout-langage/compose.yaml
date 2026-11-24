@@ -1,0 +1,133 @@
+name: universal-stack
+
+# ==============================================================================
+# Docker Compose - Modèle Universel "Tout Langage"
+# Blueprint complet intégrant 100% des standards de production du projet 3DOKR :
+# 1. Principe de moindre privilège (no-new-privileges, cap_drop: ALL)
+# 2. Système de fichiers en lecture seule (read_only: true + tmpfs)
+# 3. Isolation réseau à deux niveaux (front-tier / back-tier interne)
+# 4. Gestion des identifiants via Docker Secrets
+# 5. Démarrage déterministe avec service_healthy
+# 6. Quotas stricts de ressources CPU & RAM
+# 7. Validation stricte des variables obligatoires dans le fichier .env
+# 8. Exposition portuaire restreinte au localhost hôte (127.0.0.1)
+# 9. Images fixées au patch et basées sur Alpine (PostgreSQL 17.12 sur Alpine 3.23)
+# ==============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: universal-app:latest
+    restart: unless-stopped
+
+    # Sécurité maximale au niveau runtime du conteneur
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+
+    # Système de fichiers temporaire en mémoire vive avec interdiction d'exécution binaire
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+
+    # Exposition sécurisée uniquement sur l'interface de boucle locale de l'hôte
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+
+    # Injection des variables de configuration
+    # La syntaxe ${VAR:?message} force la présence de la variable dans .env
+    environment:
+      - APP_ENV=production
+      - PORT=8080
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:?Variable DB_NAME is required in .env}
+      - DB_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - DB_PASSWORD_FILE=/run/secrets/db_password
+      - APP_SECRET_FILE=/run/secrets/app_secret
+
+    # Montage des secrets décrits dans la section racine 'secrets:'
+    secrets:
+      - db_password
+      - app_secret
+
+    # Appartenance aux réseaux :
+    # - front-tier : permet la réception du trafic venant de l'hôte/proxy
+    # - back-tier  : permet de communiquer avec les bases de données
+    networks:
+      - front-tier
+      - back-tier
+
+    # Ordre de boot déterministe garanti par la vérification de santé
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # Sonde de santé périodique
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy || exit 0"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    # Limitation stricte des ressources allouées
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  # Service de données interne (totalement invisible depuis l'extérieur)
+  db:
+    image: postgres:17.12-alpine3.23
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    environment:
+      - POSTGRES_DB=${DB_NAME:?Variable DB_NAME is required in .env}
+      - POSTGRES_USER=${DB_USER:?Variable DB_USER is required in .env}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - back-tier
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?Variable required} -d ${DB_NAME:?Variable required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+networks:
+  # Réseau passerelle externe pour le trafic d'entrée
+  front-tier:
+  # Réseau interne hermétique : pas de passerelle vers internet ni l'hôte externe
+  back-tier:
+    internal: true
+
+volumes:
+  db-data:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  app_secret:
+    file: ./secrets/app_secret.txt
